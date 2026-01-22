@@ -1,0 +1,4 @@
+[submodule "third_parties/mjlab"]
+	path = third_parties/mjlab
+	url = https://github.com/mujocolab/mjlab.git
+	branch = main

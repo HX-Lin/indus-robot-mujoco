@@ -2,3 +2,10 @@
 	path = third_parties/mjlab
 	url = https://github.com/mujocolab/mjlab.git
 	branch = main
+[submodule "third_parties/joycon-robotics"]
+	path = third_parties/joycon-robotics
+	url = https://github.com/box2ai-robotics/joycon-robotics.git
+	branch = master
+[submodule "third_parties/lerobot"]
+	path = third_parties/lerobot
+	url = https://github.com/huggingface/lerobot.git

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Datasets (large binary files)
+cs-platform/datasets_lerobot/
+
+# Training outputs (checkpoints, logs, videos)
+cs-platform/outputs/
+
+# MuJoCo logs
+MUJOCO_LOG.TXT
+cs-platform/MUJOCO_LOG.TXT
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

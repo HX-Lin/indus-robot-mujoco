@@ -87,6 +87,14 @@ def parse_args():
         "--approach_steps", type=int, default=500,
         help="Simulation steps for approach phase (init -> seam start) (default: 500)",
     )
+    parser.add_argument(
+        "--return_steps", type=int, default=2000,
+        help="Simulation steps for return phase (seam end -> init) (default: 2000)",
+    )
+    parser.add_argument(
+        "--no_return", action="store_true",
+        help="Disable return-to-init phase (default: return enabled)",
+    )
     return parser.parse_args()
 
 
@@ -189,6 +197,8 @@ def main():
     print(f"  Render images: {render_images}")
     print(f"  Image size:    {args.image_size}")
     print(f"  Approach steps:{args.approach_steps}")
+    print(f"  Return steps:  {args.return_steps}")
+    print(f"  Return to init:{not args.no_return}")
     print(f"  Randomize WP:  True")
     print("=" * 60)
 
@@ -266,6 +276,8 @@ def main():
                 restore_qpos=settled_qpos,
                 record_interval=record_interval,
                 approach_steps=args.approach_steps,
+                return_to_init=not args.no_return,
+                return_steps=args.return_steps,
             )
 
             traj_elapsed = time.time() - traj_start_time

@@ -90,32 +90,70 @@ def to_float(x):
 
 
 def save_loss_plot(train_history, val_history, output_dir):
-    """保存训练/验证 loss 曲线图"""
+    """保存训练/验证 loss 曲线图
+
+    自适应子图数量，为 progress 等关键指标标注合理值区间。
+    """
     if not train_history:
         return
 
     # 确定 metrics 的 key 列表（从第一条记录中获取）
     metric_keys = list(train_history[0][1].keys())
-    n_metrics = min(len(metric_keys), 4)  # 最多画 4 个子图
+    n_metrics = len(metric_keys)
 
-    fig, axes = plt.subplots(1, max(n_metrics, 1), figsize=(6 * n_metrics, 5))
+    # 合理值区间参考线（绿色半透明区域）
+    # key -> (low, high, description)
+    healthy_ranges = {
+        "progress_mean":  (0.35, 0.65, "健康区间 ~0.5"),
+        "progress_loss":  (None, 0.02, "收敛目标 <0.02"),
+        "dynamics_loss":  (None, 0.01, "收敛目标 <0.01"),
+        "flow_loss":      (None, 0.001, "收敛目标 <1e-3"),
+    }
+
+    # 排版：每行最多 4 个子图
+    n_cols = min(n_metrics, 4)
+    n_rows = (n_metrics + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
     if n_metrics == 1:
-        axes = [axes]
+        axes = np.array([axes])
+    axes = np.atleast_2d(axes)
 
-    for i, key in enumerate(metric_keys[:n_metrics]):
+    for i, key in enumerate(metric_keys):
+        r, c = divmod(i, n_cols)
+        ax = axes[r, c]
+
         t_steps = [h[0] for h in train_history]
         t_vals = [h[1].get(key, 0) for h in train_history]
-        axes[i].plot(t_steps, t_vals, 'b-', alpha=0.7, label='train', linewidth=0.8)
+        ax.plot(t_steps, t_vals, 'b-', alpha=0.7, label='train', linewidth=0.8)
 
         if val_history:
             v_steps = [h[0] for h in val_history]
             v_vals = [h[1].get(key, 0) for h in val_history]
-            axes[i].plot(v_steps, v_vals, 'r-o', label='val', markersize=4, linewidth=1.5)
+            ax.plot(v_steps, v_vals, 'r-o', label='val', markersize=4, linewidth=1.5)
 
-        axes[i].set_title(key)
-        axes[i].set_xlabel('Step')
-        axes[i].legend()
-        axes[i].grid(True, alpha=0.3)
+        # 绘制合理值区间
+        if key in healthy_ranges:
+            low, high, desc = healthy_ranges[key]
+            y_min, y_max = ax.get_ylim()
+            if low is not None and high is not None:
+                ax.axhspan(low, high, color='green', alpha=0.08)
+                ax.axhline(y=(low + high) / 2, color='green', alpha=0.3,
+                           linestyle='--', linewidth=1)
+            elif high is not None:
+                ax.axhline(y=high, color='green', alpha=0.4,
+                           linestyle='--', linewidth=1)
+            ax.set_title(f"{key}\n({desc})", fontsize=9)
+        else:
+            ax.set_title(key, fontsize=10)
+
+        ax.set_xlabel('Step')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    # 隐藏多余子图
+    for i in range(n_metrics, n_rows * n_cols):
+        r, c = divmod(i, n_cols)
+        axes[r, c].set_visible(False)
 
     fig.suptitle(f'{Path(output_dir).name}', fontsize=14, fontweight='bold')
     fig.tight_layout()
@@ -167,6 +205,7 @@ def train(args):
     # 创建策略实例（用于获取 delta_timestamps 配置）
     policy_cls = get_policy_class(args.policy)
     policy = policy_cls()
+    policy._args = args  # 提前设置，供 get_delta_timestamps 读取
 
     # delta_timestamps: 策略决定需要多少帧的 action chunk
     delta_timestamps = policy.get_delta_timestamps(fps)
@@ -304,6 +343,17 @@ def train(args):
         print(f"  Patience:    {args.patience if args.patience > 0 else 'disabled'}")
     print(f"{'=' * 60}")
 
+    # 打印关键指标的合理值区间说明（temporal 模式下）
+    if getattr(args, 'use_temporal', False):
+        print("\n  Metric reference ranges:")
+        print("    flow_loss       → target <1e-3  (init ~0.4)")
+        print("    dynamics_loss   → should stay >1e-4 (=0 means collapse)")
+        print("    progress_loss   → target <0.02  (init ~0.08)")
+        print("    progress_mean   → healthy 0.35~0.65 (should track data)")
+        print("    enc_recon_loss  → target <0.005")
+        print("    flow_recon_loss → target <0.005")
+        print()
+
     policy.train()
     train_start = time.time()
     running_metrics = {}
@@ -362,10 +412,21 @@ def train(args):
 
             # Format metrics string
             metrics_str = " ".join(f"{k}={v:.4f}" for k, v in avg_metrics.items())
+
+            # 健康状态标记
+            warnings = []
+            pm = avg_metrics.get("progress_mean")
+            if pm is not None and (pm < 0.15 or pm > 0.85):
+                warnings.append(f"progress_mean={pm:.3f} !!!")
+            dl = avg_metrics.get("dynamics_loss")
+            if dl is not None and dl < 1e-5:
+                warnings.append("dynamics_loss≈0 !!!")
+            warn_str = f" | {'  '.join(warnings)}" if warnings else ""
+
             print(
                 f"step {step:6d}/{args.steps} | {metrics_str} | "
                 f"grad={to_float(grad_norm):.2f} | "
-                f"{steps_per_sec:.1f} it/s | ETA {eta_sec / 60:.0f}min"
+                f"{steps_per_sec:.1f} it/s | ETA {eta_sec / 60:.0f}min{warn_str}"
             )
             train_history.append((step, avg_metrics))
             running_metrics = {}

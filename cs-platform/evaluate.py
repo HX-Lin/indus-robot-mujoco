@@ -16,6 +16,7 @@
 """
 
 import argparse
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -218,7 +219,7 @@ def evaluate(args):
         else:
             wp_qadr = None
 
-        # Reset policy state (clear action queue/ensemble)
+        # Reset policy state (clear action queue/ensemble + memory buffer)
         policy.reset()
 
         # Video writer: side-by-side [overhead | ee | third-person], 3x width
@@ -234,6 +235,16 @@ def evaluate(args):
         ee_trajectory = []
         joint_trajectory = []
 
+        # History buffer for obs_horizon > 1
+        obs_horizon = getattr(policy, '_obs_horizon', 1)
+        history_buf = None
+        if obs_horizon > 1:
+            history_buf = {
+                "observation.state": deque(maxlen=obs_horizon),
+                "images": {k: deque(maxlen=obs_horizon) for k in
+                           getattr(policy, '_image_keys', [])},
+            }
+
         for step in range(args.max_steps):
             # Get current state
             qpos = data.qpos[:NUM_JOINTS].copy()
@@ -243,8 +254,29 @@ def evaluate(args):
             images = render_cameras(renderer, data, device)
 
             # Build observation batch
-            batch = {"observation.state": state}
-            batch.update(images)
+            if history_buf is not None:
+                # Push current frame into history
+                history_buf["observation.state"].append(state)
+                for k in history_buf["images"]:
+                    history_buf["images"][k].append(images[k])
+
+                # Fill buffer if not full (episode start)
+                while len(history_buf["observation.state"]) < obs_horizon:
+                    history_buf["observation.state"].appendleft(state)
+                    for k in history_buf["images"]:
+                        history_buf["images"][k].appendleft(images[k])
+
+                # Stack history: (1, S, ...)
+                batch = {
+                    "observation.state": torch.stack(
+                        list(history_buf["observation.state"]), dim=1),  # (1, S, 6)
+                }
+                for k in history_buf["images"]:
+                    batch[k] = torch.stack(
+                        list(history_buf["images"][k]), dim=1)  # (1, S, C, H, W)
+            else:
+                batch = {"observation.state": state}
+                batch.update(images)
 
             # Get action from policy
             action = policy.select_action(batch)  # (1, 6)

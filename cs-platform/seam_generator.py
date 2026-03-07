@@ -234,6 +234,30 @@ def _solve_ik_offline(waypoints, model, orientations=None):
     return joint_targets, errors
 
 
+def _smooth_interp(q_start, q_end, num_steps):
+    """最小急动度(minimum-jerk)平滑插值
+
+    使用5次多项式生成 S 型速度曲线:
+      s(t) = 10t³ - 15t⁴ + 6t⁵
+    起止处速度和加速度都为零，运动最平滑。
+
+    Args:
+        q_start: 起始关节角 (NUM_JOINTS,)
+        q_end:   目标关节角 (NUM_JOINTS,)
+        num_steps: 插值步数
+
+    Returns:
+        (num_steps, NUM_JOINTS) 插值结果
+    """
+    t = np.linspace(0, 1, num_steps)
+    # Minimum-jerk trajectory: s(t) = 10t^3 - 15t^4 + 6t^5
+    s = 10 * t**3 - 15 * t**4 + 6 * t**5
+    q_interp = np.zeros((num_steps, len(q_start)))
+    for j in range(len(q_start)):
+        q_interp[:, j] = q_start[j] + s * (q_end[j] - q_start[j])
+    return q_interp
+
+
 def generate_trajectory(
     seam: SeamPath,
     model: mujoco.MjModel,
@@ -246,13 +270,16 @@ def generate_trajectory(
     restore_qpos: np.ndarray = None,
     record_interval: int = 1,
     approach_steps: int = 2000,
+    return_to_init: bool = True,
+    return_steps: int = 2000,
 ) -> Trajectory:
     """
-    从焊缝路径生成完整轨迹（含接近阶段）
+    从焊缝路径生成完整轨迹（含接近阶段 + 返回原点阶段）
 
-    完整轨迹包含两个阶段:
+    完整轨迹包含三个阶段:
       1. Approach: 从初始位置平滑移动到焊缝起点
       2. Tracking: 沿焊缝路径跟踪
+      3. Return:   从焊缝终点平滑返回初始位置
 
     action[t] = state[t+1]（下一帧的目标关节位置），使模型学到
     "给定当前状态和图像，下一步应该移到哪里"。
@@ -271,6 +298,8 @@ def generate_trajectory(
         record_interval: 每隔多少仿真步保存一帧 (默认1=每步保存)。
                          例如仿真500Hz, record_interval=10 → 保存50fps
         approach_steps: 从初始位置到焊缝起点的接近阶段仿真步数。
+        return_to_init: 是否在跟踪结束后返回初始位置 (default: True)
+        return_steps: 返回阶段仿真步数 (default: 500)
 
     Returns:
         (Trajectory, ik_errors) 元组
@@ -319,10 +348,9 @@ def generate_trajectory(
     else:
         q_init = np.zeros(NUM_JOINTS)
 
-    # Approach phase: interpolate from initial position to seam start
-    q_approach = np.zeros((approach_steps, NUM_JOINTS))
-    for j in range(NUM_JOINTS):
-        q_approach[:, j] = np.linspace(q_init[j], joint_targets[0, j], approach_steps)
+    # Approach phase: smooth interpolation from initial position to seam start
+    # 使用 minimum-jerk 曲线，起止速度/加速度为零
+    q_approach = _smooth_interp(q_init, joint_targets[0], approach_steps)
 
     # Seam tracking phase: dense interpolation between waypoints
     seam_steps = num_points * sim_steps_per_point
@@ -332,8 +360,14 @@ def generate_trajectory(
     for j in range(NUM_JOINTS):
         q_seam[:, j] = np.interp(t_dense, t_waypoints, joint_targets[:, j])
 
-    # Concatenate: approach + seam tracking
-    q_dense = np.concatenate([q_approach, q_seam], axis=0)
+    # Concatenate: approach + seam tracking + return
+    segments = [q_approach, q_seam]
+    if return_to_init:
+        # Return phase: smooth interpolation from seam end back to initial position
+        q_seam_end = q_seam[-1]  # 焊缝跟踪结束时的关节角度
+        q_return = _smooth_interp(q_seam_end, q_init, return_steps)
+        segments.append(q_return)
+    q_dense = np.concatenate(segments, axis=0)
     total_steps = len(q_dense)
 
     # Step 3: Phase 1 — Mocap run: use IK trajectory to drive PD controller,

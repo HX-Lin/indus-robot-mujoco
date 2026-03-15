@@ -1,0 +1,135 @@
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Task Description}
+\label{sec:task}
+
+We evaluate \method{} on a 6-DOF robotic S-curve seam tracking task in simulation (Figure~\ref{fig:task}). A Yaskawa MR2010 industrial manipulator must perform a two-phase task:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+    \item \textbf{Approach phase} ($\sim$200 steps): The robot moves from a neutral pose to the starting point of a curved welding seam on a randomly positioned workpiece. This phase requires fast, directed motion with coarse positioning.
+    \item \textbf{Tracking phase} ($\sim$500 steps): The robot precisely follows an S-shaped seam trajectory on the workpiece surface. This phase demands slow, accurate motion with sub-millimeter precision.
+\end{enumerate}
+
+The workpiece position is randomized across episodes, requiring the policy to generalize across geometric configurations. The task is simulated in MuJoCo~\cite{todorov2012mujoco} with realistic joint dynamics and contact modeling.
+
+\subsection{Dataset}
+\label{sec:dataset}
+
+We collect 160 expert demonstration trajectories using a scripted controller with analytical inverse kinematics. Each trajectory consists of approximately 700 timesteps recorded at 50~Hz. The observation space comprises:
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+    \item Two RGB camera images ($480 \times 640$): an overhead view and an end-effector-mounted camera;
+    \item 6-dimensional joint angles (proprioceptive state).
+\end{itemize}
+The action space is 6-dimensional joint position commands (absolute). The dataset totals 112,000 frames and is stored in the LeRobot~\cite{cadene2024lerobot} format with per-feature normalization statistics.
+
+\subsection{Baselines}
+\label{sec:baselines}
+
+We compare \method{} against the following methods:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+    \item \textbf{VITA}~\cite{gao2026vita}: The base flow matching policy with single-frame observations ($\text{obs\_horizon}=1$), no temporal awareness, global average pooling.
+    \item \textbf{VITA + obs\_horizon=2}: VITA with naive two-frame stacking (features concatenated without differencing).
+    \item \textbf{VITA + explicit progress}: VITA with ground-truth normalized progress $t/T$ injected as an additional input feature during training and inference.
+    \item \textbf{VITA + \fasa{}}: VITA with \fasa{} spatial attention ($\text{obs\_horizon}=2$) but without temporal modules (Dynamics, Progress, Memory).
+    \item \textbf{ACT}~\cite{zhao2023act}: Action Chunking with Transformers, a transformer-based imitation learning baseline with implicit temporal modeling through self-attention.
+\end{itemize}
+
+\subsection{Evaluation Metrics}
+\label{sec:metrics}
+
+We evaluate each method across 50 episodes with randomized workpiece positions, reporting:
+
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+    \item \textbf{Approach success rate} (\%): Percentage of episodes where the end-effector reaches within 5mm of the seam starting point.
+    \item \textbf{Tracking distance} (mm): Mean, median, and maximum Euclidean distance between the end-effector and the nearest point on the ground-truth seam during the tracking phase.
+    \item \textbf{Multi-level coverage} (\%): Percentage of tracking steps where the distance is below 0.5mm, 1mm, 2mm, and 5mm thresholds.
+    \item \textbf{Reward level distribution}: Proportion of episodes rated S ($<$0.5mm mean) / A ($<$1mm) / B ($<$2mm) / C ($<$5mm) / D ($<$10mm) / E ($<$20mm) / FAIL ($\geq$20mm).
+\end{itemize}
+
+\subsection{Implementation Details}
+\label{sec:impl_details}
+
+All models use a latent dimension $d_z = 512$, flow network with 4 layers and MLP ratio 4.0, action chunk size $H = 32$, and action horizon $H_a = 4$. Flow sampling uses $K = 6$ Euler steps. We train for 100k gradient steps with AdamW ($\beta_1 = 0.95$, $\beta_2 = 0.999$, weight decay $10^{-6}$), batch size 32, and cosine learning rate schedule with 500 warmup steps. EMA with power $0.75$ is applied for inference. The ResNet-18 backbone is trained end-to-end with the policy (not frozen).
+
+For temporal modules: $\lambda_{\text{dyn}} = 0.05$, $\lambda_{\text{prog}} = 0.1$, pseudo-memory size $T_{\text{mem}} = 8$ (with same-episode priority sampling), inference memory buffer capacity 80 frames, and ordinal ranking temperature $\alpha = 5.0$. The base VITA loss weights are $\lambda_{\text{enc}} = 0.5$, $\lambda_{\text{fld}} = 0.5$, $\lambda_{\text{con}} = 1.0$.
+
+For \fasa{}: each camera's \fasa{} module produces a 1060-dimensional feature vector ($512 + 512 + 4 + 32$), replacing the standard 512-dimensional global average pool output. The change refinement network $R_\rho$ is a 4-layer CNN ($3 \to 32 \to 32 \to 1$) with batch normalization, taking 3-channel input (mean, max, standard deviation of channel-wise feature differences). The coordinate projection adds $\sim$33k parameters per camera. \fasa{} requires $\text{obs\_horizon} \geq 2$ to provide consecutive frames for change detection; at the first step of each episode, it gracefully degrades to global pooling with spatial softmax.
+
+For vision pre-distillation (optional): we use Grounding DINO with a Swin-T backbone (pre-trained weights from~\cite{liu2023grounding}) to pre-extract spatial attention heatmaps and 768-dimensional semantic features for all 112,000 frames across both cameras. The pre-distillation trains the ResNet backbone for 40k steps with attention BCE loss and feature cosine similarity loss. After pre-distillation, the distillation heads are discarded and the backbone continues to be fine-tuned end-to-end during policy training.
+
+The base VITA model has $\sim$31.9M parameters; adding \fasa{} and all temporal modules (LatentDynamics, ProgressHead, MemoryBank, EnhancedFlowNet with Dual FiLM) increases this to $\sim$38.9M. All experiments are run on a single NVIDIA RTX 4080 SUPER GPU (32GB).
+
+\subsection{Main Results}
+\label{sec:main_results}
+
+Table~\ref{tab:main_results} presents the main comparison. \textit{Results will be filled after experiments are completed.}
+
+\begin{table*}[t]
+\centering
+\caption{Main results on the S-curve seam tracking task. Best results in \textbf{bold}. All metrics are averaged over 50 evaluation episodes.}
+\label{tab:main_results}
+\begin{tabular}{lccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \textbf{Approach} & \multicolumn{3}{c}{\textbf{Tracking Distance (mm)}} & \multicolumn{3}{c}{\textbf{Coverage (\%)}} \\
+\cmidrule(lr){3-5} \cmidrule(lr){6-8}
+ & \textbf{Succ. (\%)} & Mean & Median & Max & $<$1mm & $<$2mm & $<$5mm \\
+\midrule
+ACT~\cite{zhao2023act}            & -- & -- & -- & -- & -- & -- & -- \\
+VITA~\cite{gao2026vita}           & -- & -- & -- & -- & -- & -- & -- \\
+VITA + obs\_horizon=2             & -- & -- & -- & -- & -- & -- & -- \\
+VITA + explicit progress          & -- & -- & -- & -- & -- & -- & -- \\
+VITA + \fasa{}                    & -- & -- & -- & -- & -- & -- & -- \\
+\midrule
+\method{} (Ours)                  & -- & -- & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+To understand the contribution of each module, we conduct a systematic ablation study (Table~\ref{tab:ablation}). We evaluate the following configurations, all using the pre-distilled ResNet backbone:
+
+\begin{enumerate}[label=(\alph*),leftmargin=*,itemsep=1pt]
+    \item VITA baseline (no temporal modules, no \fasa{})
+    \item + \fasa{} only (spatial attention, no temporal modules)
+    \item + Dynamics only (no Progress, no Memory, no \fasa{})
+    \item + Progress only (no Dynamics, no Memory, no \fasa{})
+    \item + Memory only (no Dynamics, no Progress, no \fasa{})
+    \item + \fasa{} + Dynamics + Progress (no Memory)
+    \item Full \method{} (\fasa{} + all temporal modules)
+\end{enumerate}
+
+\begin{table*}[t]
+\centering
+\caption{Ablation study. F = \fasa{}, D = Self-Predictive Latent Dynamics, P = Progress Predictor + Dual FiLM, M = Episodic Memory Bank.}
+\label{tab:ablation}
+\begin{tabular}{cccc|ccccccc}
+\toprule
+\textbf{F} & \textbf{D} & \textbf{P} & \textbf{M} & \textbf{Approach (\%)} & \textbf{Mean (mm)} & \textbf{Median (mm)} & \textbf{$<$1mm (\%)} & \textbf{$<$2mm (\%)} & \textbf{$<$5mm (\%)} \\
+\midrule
+ &  &  &  & -- & -- & -- & -- & -- & -- \\
+\checkmark &  &  &  & -- & -- & -- & -- & -- & -- \\
+ & \checkmark &  &  & -- & -- & -- & -- & -- & -- \\
+ &  & \checkmark &  & -- & -- & -- & -- & -- & -- \\
+ &  &  & \checkmark & -- & -- & -- & -- & -- & -- \\
+\checkmark & \checkmark & \checkmark &  & -- & -- & -- & -- & -- & -- \\
+\checkmark & \checkmark & \checkmark & \checkmark & -- & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Analysis}
+\label{sec:analysis}
+
+\paragraph{Progress prediction visualization.} Figure~\ref{fig:progress_curve} visualizes the predicted progress $\hat{p}_t$ across episode timesteps for several evaluation episodes. \textit{Analysis will be added after experiments.}
+
+\paragraph{Memory attention visualization.} Figure~\ref{fig:memory_attention} shows the attention weights $\bm{\alpha}$ (Eq.~\ref{eq:mem_attn}) of the memory bank over the episode history. \textit{Analysis will be added after experiments.}
+
+\paragraph{Dynamics error analysis.} Figure~\ref{fig:dynamics_error} plots the prediction error $e_t$ (Eq.~\ref{eq:pred_error}) over time. We expect to observe error spikes at the approach-to-tracking transition. \textit{Analysis will be added after experiments.}
+
+\paragraph{\fasa{} attention visualization.} Figure~\ref{fig:fasa_attention} visualizes the change attention maps $\bm{A}_{\text{change}}$ produced by \fasa{} during different task phases. During the approach phase, we expect diffuse attention as the entire scene changes rapidly. During tracking, attention should concentrate on the seam region near the tool tip, demonstrating that \fasa{} learns to focus on task-relevant regions without any explicit spatial supervision. \textit{Analysis will be added after experiments.}
+
+\paragraph{Generalization.} We evaluate generalization by testing on workpiece positions sampled from a wider distribution than the training set. \textit{Results will be added after experiments.}

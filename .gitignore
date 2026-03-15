@@ -5,12 +5,24 @@ __pycache__/
 *.egg
 dist/
 build/
+*.so
+
+# Virtual environment
+cs_env/
 
 # Datasets (large binary files)
 cs-platform/datasets_lerobot/
+cs-platform/datasets_lerobot_v1_backup/
+cs-platform/datasets_lerobot_v2_backup/
 
-# Training outputs (checkpoints, logs, videos)
+# Training outputs (checkpoints, logs, videos) — 30GB
 cs-platform/outputs/
+
+# GDINO heatmaps (precomputed features) — 23GB
+cs-platform/gdino_heatmaps/
+
+# Pretrained model weights — 662MB
+cs-platform/models/
 
 # MuJoCo logs
 MUJOCO_LOG.TXT
@@ -19,14 +31,15 @@ cs-platform/MUJOCO_LOG.TXT
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
 
-# 论文
-paper/
-paper.*
+# Jupyter
+.ipynb_checkpoints/
 
-# 数据集
-dataset*
+# Logs
+*.log

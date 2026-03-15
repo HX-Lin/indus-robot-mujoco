@@ -1,0 +1,46 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Two orthogonal capabilities.} The central thesis of \method{} is that temporal awareness and spatial awareness address fundamentally different failure modes of flow matching policies. Temporal awareness resolves \emph{when}-related ambiguities---which behavioral mode to use, how far along the task has progressed, what the robot has already observed. Spatial awareness resolves \emph{where}-related ambiguities---which image region contains the task-relevant interaction, where the tool contacts the workpiece, in which direction the interaction is moving. Our ablation study confirms that these two capabilities provide complementary, non-redundant improvements: enabling one does not diminish the benefit of the other.
+
+\paragraph{Applicability beyond seam tracking.} While we evaluate \method{} on a seam tracking task, both core strategies are task-agnostic. Any multi-phase manipulation task---such as pick-and-place (reach $\to$ grasp $\to$ transport $\to$ place), assembly (align $\to$ insert $\to$ secure), or tool use---can benefit from temporal awareness. Any precision task requiring fine-grained spatial understanding---such as insertion, suturing, or contact-rich manipulation---can benefit from \fasa{}. The self-supervised nature of all modules means no task-specific annotations are needed when transferring to new domains.
+
+\paragraph{Comparison with transformer-based temporal modeling.} Transformer-based policies (e.g., ACT~\cite{zhao2023act}) capture temporal dependencies through self-attention over observation sequences at $O(T^2)$ computational cost. In contrast, \method{} achieves temporal awareness within an MLP-based flow network at $O(T)$ cost (memory bank) plus negligible overhead (dynamics model and progress head are single forward passes). More importantly, our approach separates temporal awareness into semantically distinct components---future prediction, present estimation, and past retrieval ---each providing interpretable signals, whereas transformer self-attention conflates all temporal information into opaque attention patterns. Our Dual FiLM conditioning is architecturally non-invasive: it adds a parallel modulation pathway without modifying the base layer structure.
+
+\paragraph{\fasa{} vs.\ distillation-based spatial attention.} Vision foundation model distillation (e.g., from Grounding DINO or CLIP) can provide spatial attention supervision, but with important limitations: (1)~it requires access to a specific teacher model and an offline feature extraction pipeline; (2)~the distilled attention is \emph{static}---reflecting the teacher's generic object detection capability, not the dynamic interaction patterns of the specific task; (3)~it does not generalize across domains without re-running the teacher. \fasa{} addresses all three limitations by deriving spatial attention from the temporal structure of the task itself. The change-based attention naturally adapts to whatever is currently relevant: during approach, it highlights the moving robot against the static scene; during tracking, it focuses on the subtle tool-workpiece contact region. In our framework, optional pre-distillation enhances the backbone's feature quality (which benefits \fasa{}'s change detection), while \fasa{} provides the dynamic, task-adaptive spatial attention at the pooling level.
+
+\paragraph{Computational overhead.} Table~\ref{tab:compute} summarizes the parameter and inference time overhead. The complete \method{} framework adds $\sim$7.0M parameters ($\sim$22\%) to the base VITA architecture, dominated by the Dual FiLM flow network and memory bank. Critically, the \fasa{} module adds only $\sim$67k parameters per camera while providing $2.07\times$ richer spatial features, making it an exceptionally efficient upgrade.
+
+\begin{table}[t]
+\centering
+\caption{Computational overhead of \method{} modules relative to the base VITA policy.}
+\label{tab:compute}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Component} & \textbf{Params} & \textbf{Inference (ms)} \\
+\midrule
+Base VITA & $\sim$31.9M & -- \\
+\midrule
+\multicolumn{3}{l}{\textit{Spatial awareness}} \\
+\quad + \fasa{} (2 cameras) & +$\sim$67k & +$<$0.5 \\
+\midrule
+\multicolumn{3}{l}{\textit{Temporal awareness}} \\
+\quad + Latent Dynamics & +$\sim$0.8M & +$<$0.1 \\
+\quad + Progress Head & +$\sim$0.2M & +$<$0.1 \\
+\quad + Memory Bank & +$\sim$1.0M & +$<$0.5 \\
+\quad + Dual FiLM (vs.\ single FiLM) & +$\sim$0.6M & +$<$0.2 \\
+\midrule
+\textbf{Total \method{}} & $\sim$38.9M (+22\%) & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Limitations.} Several limitations should be acknowledged:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+    \item \textbf{Ordinal ranking assumption.} The progress predictor uses ordinal ranking over same-episode frame pairs, which correctly handles non-linear progress curves but still assumes monotonic progress. Tasks with reversible sub-goals (e.g., retry after failure) would require a non-monotonic progress formulation.
+    \item \textbf{Same-episode pseudo-memory gap.} During training, pseudo-memory is constructed by prioritizing same-episode frames within mini-batches. While this reduces the distribution gap with inference-time sequential memory, batch randomization means same-episode coverage may be sparse for large datasets with many episodes.
+    \item \textbf{\fasa{} cold start.} \fasa{} requires $\text{obs\_horizon} \geq 2$ to compute inter-frame changes. At the first step of each episode (no previous frame), it degrades to global pooling with spatial softmax. For tasks where the first action is critical, a learned initial feature map could mitigate this.
+    \item \textbf{Single-task evaluation.} We evaluate on a single task domain. While both temporal and spatial awareness modules are designed to be general, broader evaluation across diverse manipulation tasks would strengthen the claims.
+\end{itemize}
+
+\paragraph{Future directions.} Promising extensions include: (1)~deploying \method{} on real robotic hardware to validate sim-to-real transfer of both temporal and spatial awareness; (2)~scaling temporal awareness to longer-horizon, multi-stage tasks with more than two phases, where the self-predictive dynamics model should detect multiple phase boundaries; (3)~exploring multi-scale \fasa{} that operates on multiple ResNet layer outputs for hierarchical spatial attention; (4)~combining \fasa{}'s change attention maps with curiosity-driven exploration for reinforcement learning; and (5)~extending \fasa{} to multi-frame temporal contrast (beyond two consecutive frames) for richer motion pattern detection.

@@ -1,0 +1,211 @@
+\section{Method}
+\label{sec:method}
+
+\subsection{Overview}
+\label{sec:method_overview}
+
+We identify two orthogonal limitations of standard flow matching visuomotor policies and address each with a self-supervised solution:
+
+\begin{enumerate}[leftmargin=*,itemsep=4pt]
+    \item \textbf{Temporal blindness} (Section~\ref{sec:temporal}): The policy makes each decision independently, without knowing ``where it is'' in the task. We propose a unified \emph{Past-Present-Future} temporal awareness framework that extracts temporal structure entirely from the observation stream---no phase labels, no temporal annotations.
+
+    \item \textbf{Spatial information loss} (Section~\ref{sec:spatial}): Global average pooling discards all spatial structure, losing information about \emph{where} task-relevant interactions occur. We propose \emph{\fasafull{} (\fasa{})}, a self-supervised spatial attention module that discovers interaction regions through inter-frame feature temporal contrast---no external teacher model, no spatial annotations.
+\end{enumerate}
+
+Both strategies are entirely self-supervised and complementary: temporal awareness captures \emph{cross-frame} dynamics, while spatial awareness enriches \emph{per-frame} visual features. The complete \method{} (\methodfull{}) framework integrates both into the VITA flow matching architecture with minimal overhead, training the entire model end-to-end including the ResNet backbone. Figure~\ref{fig:architecture} provides an architectural overview.
+
+% ==================================================================
+% CORE 1: TEMPORAL AWARENESS
+% ==================================================================
+\subsection{Self-Supervised Temporal Awareness}
+\label{sec:temporal}
+
+Standard flow matching policies observe only the current frame (or a short fixed-length history) at each step. We augment the policy with a unified temporal awareness framework organized around three temporal perspectives---\emph{Future}, \emph{Present}, and \emph{Past}---each contributing a complementary signal. The key design principle is that all temporal information is extracted from the observation stream itself through self-supervised objectives.
+
+% --- 4.2.1 Semantic Velocity ---
+\subsubsection{Semantic Velocity via Feature Differencing}
+\label{sec:temporal_diff}
+
+Rather than naively stacking consecutive frames $[\bm{f}_{t-1}, \bm{f}_t]$ (which doubles dimensionality without encoding \emph{what changed}), we compute explicit feature-space differences:
+\begin{equation}
+    \bm{o}_t = [\bm{f}_t;\; \underbrace{\bm{f}_t - \bm{f}_{t-1}}_{\text{``semantic velocity''}};\; \bm{s}_t;\; \bm{s}_t - \bm{s}_{t-1}] \in \RR^{2(d_f N + d_s)},
+    \label{eq:temporal_obs}
+\end{equation}
+where $\bm{f}_t$ is the per-camera visual feature (Section~\ref{sec:spatial}), $\bm{s}_t$ is the proprioceptive state, and $N$ is the number of cameras. The feature difference $\Delta \bm{f}_t = \bm{f}_t - \bm{f}_{t-1}$ encodes directional change in feature space---large during approach (rapid scene change), small during tracking (subtle shifts)---providing an implicit phase signal. This ``semantic velocity'' representation has fixed dimensionality $2(d_f N + d_s)$ regardless of observation horizon.
+
+% --- 4.2.2 Future: Latent Dynamics ---
+\subsubsection{Future: Multiscale Self-Predictive Dynamics}
+\label{sec:dynamics}
+
+\textbf{Motivation.} If the policy could predict what happens next, then \emph{surprises}---moments when prediction fails---would indicate phase transitions. A single-step predictor at 50~Hz, however, produces near-zero error everywhere because consecutive frames are almost identical. We therefore amplify the phase-transition signal through \emph{multiscale autoregressive prediction}.
+
+\textbf{Autoregressive predictor.} A latent dynamics module $D_\xi: \RR^{d_z} \to \RR^{d_z}$ (2-layer MLP with GELU) is trained to predict the next observation latent against a stop-gradient target projection $\Pi$ (linear, no bias), following the asymmetric design of BYOL~\cite{grill2020bootstrap}:
+\begin{equation}
+    \LL_{\text{dyn}} = \left\| D_\xi(\bm{z}_{t-1}^{\text{obs}}) - \text{sg}\!\left(\Pi(\bm{z}_{t}^{\text{obs}})\right) \right\|^2.
+    \label{eq:dynamics_loss}
+\end{equation}
+Since the observation horizon is 2, every training sample naturally carries the $(t{-}1, t)$ frame pair---no batch-internal search for same-episode neighbors is needed.
+
+\textbf{Multiscale cumulative drift.} From the single-step prediction $\hat{\bm{z}}_1 = D_\xi(\bm{z}_{t-1})$, we iterate the same predictor autoregressively for 3 and 7 steps, yielding $\hat{\bm{z}}_3$ and $\hat{\bm{z}}_7$. The cumulative drift at each scale measures how far the trajectory deviates from the initial prediction:
+\begin{equation}
+    e_k = \| \hat{\bm{z}}_k - \hat{\bm{z}}_1 \|^2, \quad k \in \{3, 7\}.
+    \label{eq:multiscale_error}
+\end{equation}
+During smooth motion, autoregressive predictions stay close to $\hat{\bm{z}}_1$ and $e_k$ remains small. At phase transitions, prediction errors compound exponentially with depth, producing large $e_k$. Combined with the supervised single-step error $e_1 = \| \hat{\bm{z}}_1 - \Pi(\bm{z}_t) \|^2$, the \emph{predictability profile} $\bm{e}_t = [e_1, e_3, e_7] \in \RR^3$ forms a rich, self-supervised phase fingerprint. Crucially, only $e_1$ requires a ground-truth target ($\bm{z}_t$); $e_3$ and $e_7$ are purely self-supervised cumulative signals.
+
+% --- 4.2.3 Present: Progress + Dual FiLM ---
+\subsubsection{Present: Progress Predictor with Dual FiLM}
+\label{sec:progress}
+
+\textbf{Progress estimation.} A 3-layer MLP $P_\omega$ with sigmoid output estimates task progress $\hat{p}_t \in [0,1]$ from the observation latent and the multiscale predictability profile:
+\begin{equation}
+    \hat{p}_t = P_\omega([\bm{z}_t^{\text{obs}};\; \text{sg}(\bm{e}_t)]) \in [0,1].
+    \label{eq:progress_pred}
+\end{equation}
+The input dimension is $d_z + 3$, where $\bm{e}_t \in \RR^3$ is the predictability profile concatenated with the $d_z$-dimensional latent.
+
+\textbf{Self-supervised progress loss.} Rather than relying on frame indices or any external labels, we exploit the temporal ordering inherent in the observation horizon: since each training sample contains frames $(t{-}1, t)$, we can compute progress for both frames and enforce a purely self-supervised constraint:
+\begin{equation}
+    \LL_{\text{prog}} = \underbrace{\max\!\bigl(0,\; \delta - (\hat{p}_t - \hat{p}_{t-1})\bigr)}_{\text{monotonicity (margin ranking)}} + \lambda_s \underbrace{(\hat{p}_t - \hat{p}_{t-1})^2}_{\text{smoothness}},
+    \label{eq:progress_loss}
+\end{equation}
+where $\delta = 0.001$ is a small margin ensuring strict monotonic increase, and $\lambda_s = 0.1$ penalizes excessively large progress jumps. Together, the monotonicity and smoothness constraints cause $P_\omega$ to learn a smooth, monotonically increasing progress curve from $\sim\!0$ to $\sim\!1$ over each episode---\emph{without any temporal labels}. The shape of this curve is non-linear and determined entirely by the observation latent structure.
+
+\textbf{Dual FiLM conditioning.} The predicted progress modulates the flow network through a \emph{second} FiLM pathway, parallel to the standard flow-timestep FiLM. Each Enhanced Flow Network layer applies:
+\begin{align}
+    \bm{h}_{\text{norm}} &= (\bm{1} + \bm{\alpha}_t) \odot \text{LN}(\bm{h}) + \bm{\beta}_t, \label{eq:dual_film_time} \\
+    \bm{h}_{\text{prog}} &= (\bm{1} + \bm{\alpha}_p) \odot \bm{h}_{\text{norm}} + \bm{\beta}_p, \label{eq:dual_film_prog} \\
+    \bm{h}' &= \bm{h} + (\bm{1} + \gamma_p) \odot \gamma_t \odot \text{MLP}(\bm{h}_{\text{prog}}), \label{eq:dual_film_out}
+\end{align}
+where $(\gamma_t, \bm{\alpha}_t, \bm{\beta}_t)$ and $(\gamma_p, \bm{\alpha}_p, \bm{\beta}_p)$ are independently parameterized from sinusoidal embeddings of $t$ and $\hat{p}_t$, respectively. Both modulators are zero-initialized to preserve base flow behavior at the start of training. The separation is semantically motivated: $t \in [0,1]$ controls where along the \emph{generative ODE} the network operates, while $\hat{p}_t \in [0,1]$ controls what \emph{behavioral mode} is appropriate.
+
+% --- 4.2.4 Past: Memory Bank ---
+\subsubsection{Past: Episodic Memory Bank}
+\label{sec:memory}
+
+The dynamics model provides a \emph{future} signal and the progress head a \emph{present} signal; neither captures the accumulated \emph{history} of the current episode. A lightweight memory bank $\MM$ stores past observation latents and retrieves context via single-head cross-attention:
+\begin{equation}
+    \bm{c}_t = W_O\!\left(\text{softmax}\!\left(\frac{W_Q \bm{z}_t^{\text{obs}} \cdot (W_K \bm{M})^\top}{\sqrt{d_z}}\right) W_V \bm{M}\right) \in \RR^{d_z},
+    \label{eq:mem_read}
+\end{equation}
+where $\bm{M} \in \RR^{T \times d_z}$ is the memory buffer. The context $\bm{c}_t$ is fused with the current latent via concatenation and projection:
+\begin{equation}
+    \bm{z}_t^{\text{enr}} = W_{\text{fuse}}\,[\bm{z}_t^{\text{obs}};\; \bm{c}_t] \in \RR^{d_z},
+    \label{eq:enriched_latent}
+\end{equation}
+which replaces $\bm{z}_t^{\text{obs}}$ as the flow ODE starting point.
+
+\textbf{Same-episode pseudo-memory.} During training, we construct pseudo-memory by prioritizing frames from the \emph{same episode} within the mini-batch (identified via episode indices), supplementing with random frames when insufficient same-episode samples exist. This reduces the distribution gap between training (pseudo-memory from mixed batches) and inference (genuine sequential history). At inference, a FIFO buffer accumulates real observation latents, cleared at each episode start.
+
+% ==================================================================
+% CORE 2: SPATIAL AWARENESS
+% ==================================================================
+\subsection{Self-Supervised Spatial Awareness: \fasa{}}
+\label{sec:spatial}
+
+Global average pooling collapses a $C \times H \times W$ feature map into a single $C$-dimensional vector, losing all spatial information. For precision tasks, the policy needs to know \emph{where} the interaction is happening. We propose \fasa{} (\fasafull{}), which recovers spatial information through a simple but powerful insight: \textbf{the regions changing most between consecutive frames are the regions most relevant to the current task}.
+
+% --- 4.3.1 Change Detection ---
+\subsubsection{Multi-Statistic Change Detection}
+\label{sec:fasa_change}
+
+Given consecutive feature maps $\bm{F}_t, \bm{F}_{t-1} \in \RR^{C \times H \times W}$ from the ResNet backbone, \fasa{} computes the element-wise absolute difference $\bm{\Delta} = |\bm{F}_t - \bm{F}_{t-1}|$ and extracts three complementary statistics:
+\begin{equation}
+    \bm{C}_{\text{in}} = \left[\;
+        \underbrace{\textstyle\text{mean}_c\, \bm{\Delta}}_{\text{average intensity}}\;;\;
+        \underbrace{\max_c \bm{\Delta}}_{\text{peak response}}\;;\;
+        \underbrace{\text{std}_c\, \bm{\Delta}}_{\text{channel consistency}}
+    \;\right] \in \RR^{3 \times H \times W}.
+    \label{eq:change_input}
+\end{equation}
+
+A learnable refinement network $R_\rho$ (4-layer CNN: $3 \to 32 \to 32 \to 1$, with batch normalization and ReLU) processes these statistics into a normalized change attention map, and its complement forms the stable attention map:
+\begin{equation}
+    \bm{A}_{\text{change}} = \text{normalize}\!\left(\sigma(R_\rho(\bm{C}_{\text{in}}))\right), \quad
+    \bm{A}_{\text{stable}} = \text{normalize}\!\left(1 - \sigma(R_\rho(\bm{C}_{\text{in}}))\right),
+    \label{eq:change_attn}
+\end{equation}
+where normalization ensures spatial weights sum to one. The refinement network $R_\rho$ learns to suppress irrelevant changes (e.g., lighting) and amplify task-relevant ones (e.g., tool-workpiece contact), trained end-to-end through the policy's action prediction losses.
+
+% --- 4.3.2 Spatial Feature Extraction ---
+\subsubsection{Rich Spatial Feature Extraction}
+\label{sec:fasa_features}
+
+From the attention maps, \fasa{} extracts four complementary spatial representations per camera:
+
+\textbf{(1) Dynamic features} ($\RR^{512}$): Attention-weighted pooling over interaction regions:
+\begin{equation}
+    \bm{f}_{\text{dyn}} = \textstyle\sum_{y,x} \bm{A}_{\text{change}}(y,x) \cdot \bm{F}_t(:,y,x).
+    \label{eq:dynamic_pool}
+\end{equation}
+
+\textbf{(2) Static features} ($\RR^{512}$): Attention-weighted pooling over stable context:
+\begin{equation}
+    \bm{f}_{\text{sta}} = \textstyle\sum_{y,x} \bm{A}_{\text{stable}}(y,x) \cdot \bm{F}_t(:,y,x).
+    \label{eq:static_pool}
+\end{equation}
+
+\textbf{(3) Change centroid and direction} ($\RR^4$): Where the interaction is and which way it's moving:
+\begin{equation}
+    [c_x, c_y, d_x, d_y], \quad (c_x, c_y) = \textstyle\sum_{y,x} \bm{A}_{\text{change}} \cdot (x,y), \quad (d_x, d_y) = \text{centroid}_t - \text{centroid}_{t-1}.
+    \label{eq:change_coords}
+\end{equation}
+
+\textbf{(4) Spatial softmax coordinates} ($\RR^{d_{\text{coord}}}$): Per-channel expected positions~\cite{levine2016end}, projected to $d_{\text{coord}} = 32$ dimensions. These provide fine-grained keypoint information independent of the change detection.
+
+The unified per-camera output is:
+\begin{equation}
+    \bm{f}_{\fasa{}} = [\bm{f}_{\text{dyn}};\; \bm{f}_{\text{sta}};\; c_x, c_y, d_x, d_y;\; \bm{f}_{\text{coord}}] \in \RR^{1060},
+    \label{eq:fasa_output}
+\end{equation}
+replacing the 512-dimensional global average pool, providing $2.07\times$ richer spatial information.
+
+\textbf{Graceful degradation.} When no previous frame is available (first step), \fasa{} falls back to global average pooling for both streams and zeros for change coordinates, ensuring a consistent output dimension.
+
+\textbf{Design advantages.} Unlike distillation-based spatial attention, \fasa{} is (1)~\emph{self-supervised}---no teacher model needed; (2)~\emph{plug-and-play}---works with any CNN backbone given consecutive frames; (3)~\emph{dynamic}---attention adapts to the current interaction in real time.
+
+% ==================================================================
+% TRAINING AND INFERENCE
+% ==================================================================
+\subsection{Training and Inference}
+\label{sec:training}
+
+\subsubsection{Joint Training Objective}
+
+The complete \method{} framework is trained end-to-end (including the ResNet backbone) with:
+\begin{equation}
+    \LL_{\method{}} = \underbrace{\LL_{\text{flow}} + \lambda_{\text{enc}}\,\LL_{\text{enc}} + \lambda_{\text{fld}}\,\LL_{\text{fld}} + \lambda_{\text{con}}\,\LL_{\text{con}}}_{\text{Base VITA losses}} + \underbrace{\lambda_{\text{dyn}}\,\LL_{\text{dyn}} + \lambda_{\text{prog}}\,\LL_{\text{prog}}}_{\text{Temporal losses}}.
+    \label{eq:total_loss}
+\end{equation}
+\fasa{} has no dedicated loss---its change refinement network learns through gradients from the action prediction losses. Similarly, the memory bank is trained through the flow losses via the enriched latent. The temporal losses ($\LL_{\text{dyn}}, \LL_{\text{prog}}$) provide self-supervised regularization that does not interfere with the primary action prediction objective.
+
+\subsubsection{Optional Backbone Pre-Distillation}
+
+The backbone can optionally be initialized via offline distillation from Grounding DINO~\cite{liu2023grounding}, transferring spatial attention (BCE loss against detection heatmaps) and semantic features (cosine similarity loss against Swin-T features). The distillation heads are discarded afterward, and the backbone continues to be fine-tuned end-to-end. This provides a better starting point but is not required---\fasa{} can learn effective spatial features from scratch.
+
+\subsubsection{Inference}
+
+Algorithm~\ref{alg:inference} summarizes the \method{} inference pipeline. At each re-planning step: (1)~\fasa{} extracts spatial features from consecutive frames; (2)~temporal differencing computes semantic velocity; (3)~the dynamics model computes prediction error from the cached previous latent; (4)~the progress head estimates $\hat{p}_t$; (5)~the memory bank retrieves trajectory context; (6)~the enriched latent flows to an action latent via ODE integration with Dual FiLM; (7)~the action decoder produces an action chunk, of which $H_a$ actions are executed before re-planning.
+
+\begin{algorithm}[t]
+\caption{\method{} Inference}
+\label{alg:inference}
+\begin{algorithmic}[1]
+\REQUIRE Trained policy $\pi_{\method{}}$, episode length $L$
+\STATE Initialize memory $\bm{M} \leftarrow \emptyset$, queue $\mathcal{Q} \leftarrow \emptyset$, $\bm{F}_{-1} \leftarrow \texttt{None}$, $\bm{z}_{-1} \leftarrow \texttt{None}$
+\FOR{$t = 0, 1, \ldots, L-1$}
+    \IF{$\mathcal{Q}$ is empty}
+        \STATE $\bm{F}_t \leftarrow \text{ResNet}(\{I_t^{(i)}\})$ \hfill \textit{// backbone features}
+        \STATE $\bm{f}_t \leftarrow \fasa{}(\bm{F}_t, \bm{F}_{t-1})$ \hfill \textit{// spatial awareness}
+        \STATE $\bm{z}_t \leftarrow W_{\text{enc}}\,[\bm{f}_t;\, \Delta\bm{f}_t;\, s_t;\, \Delta s_t]$ \hfill \textit{// semantic velocity}
+        \STATE $\bm{e}_t \leftarrow [e_1, e_3, e_7]$ via multiscale autoregressive $D_\xi$ from $\bm{z}_{t-1}$ \textbf{if} $\bm{z}_{t-1} \neq \texttt{None}$ \textbf{else} $\bm{0}$ \hfill \textit{// future}
+        \STATE $\hat{p}_t \leftarrow P_\omega([\bm{z}_t;\, \bm{e}_t])$ \hfill \textit{// present}
+        \STATE $\bm{c}_t \leftarrow \MM.\text{read}(\bm{z}_t, \bm{M})$ \hfill \textit{// past}
+        \STATE $\bm{z}_t^{\text{enr}} \leftarrow W_{\text{fuse}}[\bm{z}_t;\, \bm{c}_t]$
+        \STATE $\bm{a}_{t:t+H} \leftarrow D_\psi\!\left(\text{ODE}(G_\theta,\, \bm{z}_t^{\text{enr}},\, \hat{p}_t)\right)$ \hfill \textit{// flow + decode}
+        \STATE Enqueue $\bm{a}_{t:t+H_a}$; \; $\bm{M}.\text{append}(\bm{z}_t)$; \; $\bm{F}_{t-1} \leftarrow \bm{F}_t$; \; $\bm{z}_{t-1} \leftarrow \bm{z}_t$
+    \ENDIF
+    \STATE Execute $a_t \leftarrow \mathcal{Q}.\text{dequeue}()$
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}

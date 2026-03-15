@@ -1,0 +1,140 @@
+\section{方法}
+\label{sec:method}
+
+\subsection{概述}
+\label{sec:method_overview}
+
+标准流匹配视觉运动策略采用全局平均池化将卷积特征图压缩为单一向量，丢失了精密任务所需的空间结构信息。我们提出\textbf{\fasafull{}（\fasa{}）}，一个即插即用的自监督空间注意力模块，通过两个互补机制解决这一问题：
+
+\begin{enumerate}[leftmargin=*,itemsep=4pt]
+    \item \textbf{基于特征差分的语义速度}（第~\ref{sec:temporal_diff}节）：通过计算连续帧特征的显式差分，编码特征空间中的方向性变化，为空间注意力提供时间对比基础。
+
+    \item \textbf{\fasa{}空间注意力}（第~\ref{sec:spatial}节）：通过检测帧间特征变化自监督发现交互区域，将空间特征分解为动态流和静态流，编码变化质心和方向，提取空间关键点坐标——提供比全局池化丰富$2\times$的空间信息，无需外部教师模型或空间标注。
+\end{enumerate}
+
+\fasa{}完全自监督且即插即用：其变化精炼网络通过策略的动作预测损失端到端训练，无需专门的辅助损失。它仅需连续观测帧并在标准卷积特征图上操作，可与任何CNN主干网络配合使用。图~\ref{fig:architecture}提供了架构概览。
+
+% ==================================================================
+% 语义速度
+% ==================================================================
+\subsection{基于特征差分的语义速度}
+\label{sec:temporal_diff}
+
+与其简单地堆叠连续帧$[\bm{f}_{t-1}, \bm{f}_t]$（这会使维度加倍但未编码\emph{变化内容}），我们计算显式的特征空间差分：
+\begin{equation}
+    \bm{o}_t = [\bm{f}_t;\; \underbrace{\bm{f}_t - \bm{f}_{t-1}}_{\text{"语义速度"}};\; \bm{s}_t;\; \bm{s}_t - \bm{s}_{t-1}] \in \RR^{2(d_f N + d_s)},
+    \label{eq:temporal_obs}
+\end{equation}
+其中$\bm{f}_t$是逐相机视觉特征（第~\ref{sec:spatial}节），$\bm{s}_t$是本体感受状态，$N$是相机数量。特征差分$\Delta \bm{f}_t = \bm{f}_t - \bm{f}_{t-1}$编码了特征空间中的方向性变化——接近时大（场景快速变化），跟踪时小（细微偏移）——提供了隐式的阶段信号。这种"语义速度"表示具有固定维度$2(d_f N + d_s)$，不随观测窗长度变化。
+
+语义速度与\fasa{}互补：\fasa{}提供丰富的\emph{逐帧}空间特征，而特征差分编码\emph{跨帧}的变化方向和幅度。两者共同使策略既知道交互"发生在哪里"，也知道交互"如何变化"。
+
+% ==================================================================
+% 核心：空间感知
+% ==================================================================
+\subsection{自监督空间感知：\fasa{}}
+\label{sec:spatial}
+
+全局平均池化将$C \times H \times W$的特征图压缩为单个$C$维向量，丢失所有空间信息。对于精密任务，策略需要知道交互\emph{发生在哪里}。我们提出\fasa{}（\fasafull{}），通过一个简单但强大的洞察恢复空间信息：\textbf{连续帧之间变化最大的区域是与当前任务最相关的区域}。
+
+% --- 变化检测 ---
+\subsubsection{多统计量变化检测}
+\label{sec:fasa_change}
+
+给定来自ResNet主干网络的连续特征图$\bm{F}_t, \bm{F}_{t-1} \in \RR^{C \times H \times W}$，\fasa{}计算逐元素绝对差分$\bm{\Delta} = |\bm{F}_t - \bm{F}_{t-1}|$并提取三个互补统计量：
+\begin{equation}
+    \bm{C}_{\text{in}} = \left[\;
+        \underbrace{\textstyle\text{mean}_c\, \bm{\Delta}}_{\text{平均强度}}\;;\;
+        \underbrace{\max_c \bm{\Delta}}_{\text{峰值响应}}\;;\;
+        \underbrace{\text{std}_c\, \bm{\Delta}}_{\text{通道一致性}}
+    \;\right] \in \RR^{3 \times H \times W}.
+    \label{eq:change_input}
+\end{equation}
+
+一个可学习的精炼网络$R_\rho$（4层CNN：$3 \to 32 \to 32 \to 1$，带批归一化和ReLU）将这些统计量处理为归一化的变化注意力图，其互补构成稳定注意力图：
+\begin{equation}
+    \bm{A}_{\text{change}} = \text{normalize}\!\left(\sigma(R_\rho(\bm{C}_{\text{in}}))\right), \quad
+    \bm{A}_{\text{stable}} = \text{normalize}\!\left(1 - \sigma(R_\rho(\bm{C}_{\text{in}}))\right),
+    \label{eq:change_attn}
+\end{equation}
+其中归一化确保空间权重之和为一。精炼网络$R_\rho$学习抑制无关变化（如光照）并放大任务相关变化（如工具-工件接触），通过策略的动作预测损失端到端训练。
+
+% --- 空间特征提取 ---
+\subsubsection{丰富的空间特征提取}
+\label{sec:fasa_features}
+
+从注意力图出发，\fasa{}为每个相机提取四种互补的空间表示：
+
+\textbf{（1）动态特征}（$\RR^{512}$）：交互区域上的注意力加权池化：
+\begin{equation}
+    \bm{f}_{\text{dyn}} = \textstyle\sum_{y,x} \bm{A}_{\text{change}}(y,x) \cdot \bm{F}_t(:,y,x).
+    \label{eq:dynamic_pool}
+\end{equation}
+
+\textbf{（2）静态特征}（$\RR^{512}$）：稳定上下文上的注意力加权池化：
+\begin{equation}
+    \bm{f}_{\text{sta}} = \textstyle\sum_{y,x} \bm{A}_{\text{stable}}(y,x) \cdot \bm{F}_t(:,y,x).
+    \label{eq:static_pool}
+\end{equation}
+
+\textbf{（3）变化质心和方向}（$\RR^4$）：交互发生的位置及其移动方向：
+\begin{equation}
+    [c_x, c_y, d_x, d_y], \quad (c_x, c_y) = \textstyle\sum_{y,x} \bm{A}_{\text{change}} \cdot (x,y), \quad (d_x, d_y) = \text{centroid}_t - \text{centroid}_{t-1}.
+    \label{eq:change_coords}
+\end{equation}
+
+\textbf{（4）空间Softmax坐标}（$\RR^{d_{\text{coord}}}$）：逐通道的期望位置~\cite{levine2016end}，投影至$d_{\text{coord}} = 32$维。这些提供了独立于变化检测的细粒度关键点信息。
+
+统一的逐相机输出为：
+\begin{equation}
+    \bm{f}_{\fasa{}} = [\bm{f}_{\text{dyn}};\; \bm{f}_{\text{sta}};\; c_x, c_y, d_x, d_y;\; \bm{f}_{\text{coord}}] \in \RR^{1060},
+    \label{eq:fasa_output}
+\end{equation}
+替代512维的全局平均池化，提供$2.07\times$更丰富的空间信息。
+
+\textbf{优雅降级。}当没有前一帧可用时（第一步），\fasa{}对两个流均回退到全局平均池化，变化坐标置零，确保输出维度一致。
+
+\textbf{设计优势。}与基于蒸馏的空间注意力不同，\fasa{}是（1）\emph{自监督的}——不需要教师模型；（2）\emph{即插即用的}——给定连续帧即可与任何CNN主干网络配合使用；（3）\emph{动态的}——注意力实时适应当前交互；（4）\emph{无辅助损失的}——完全通过策略的主损失函数端到端训练。
+
+% ==================================================================
+% 训练与推理
+% ==================================================================
+\subsection{训练与推理}
+\label{sec:training}
+
+\subsubsection{训练目标}
+
+\method{}框架端到端训练（包括ResNet主干网络），使用与基础VITA相同的损失函数：
+\begin{equation}
+    \LL_{\method{}} = \LL_{\text{flow}} + \lambda_{\text{enc}}\,\LL_{\text{enc}} + \lambda_{\text{fld}}\,\LL_{\text{fld}} + \lambda_{\text{con}}\,\LL_{\text{con}}.
+    \label{eq:total_loss}
+\end{equation}
+\fasa{}没有专门的辅助损失——其变化精炼网络完全通过动作预测损失的梯度学习。这是\fasa{}的一个重要设计特点：它不引入可能干扰主要优化目标的额外损失项，而是自然地从流匹配损失中学习任务相关的空间注意力。
+
+\subsubsection{可选的主干网络预蒸馏}
+
+主干网络可以通过离线蒸馏从Grounding DINO~\cite{liu2023grounding}可选地初始化，传递空间注意力（对检测热图的BCE损失）和语义特征（对Swin-T特征的余弦相似度损失）。蒸馏头随后被丢弃，主干网络继续端到端微调。这提供了更好的起始点但不是必需的——\fasa{}可以从零开始学习有效的空间特征。
+
+\subsubsection{推理}
+
+算法~\ref{alg:inference}总结了推理流程。在每个重规划步骤：（1）\fasa{}从连续帧提取空间特征；（2）特征差分计算语义速度；（3）观测编码器将丰富的空间特征映射到隐空间；（4）隐变量通过ODE积分流向动作隐变量；（5）动作解码器产生一个动作块，其中$H_a$个动作在重规划前被执行。
+
+\begin{algorithm}[t]
+\caption{\method{} 推理}
+\label{alg:inference}
+\begin{algorithmic}[1]
+\REQUIRE 训练好的策略$\pi_{\method{}}$，episode长度$L$
+\STATE 初始化队列$\mathcal{Q} \leftarrow \emptyset$，$\bm{F}_{-1} \leftarrow \texttt{None}$
+\FOR{$t = 0, 1, \ldots, L-1$}
+    \IF{$\mathcal{Q}$为空}
+        \STATE $\bm{F}_t \leftarrow \text{ResNet}(\{I_t^{(i)}\})$ \hfill \textit{// 主干网络特征图}
+        \STATE $\bm{f}_t \leftarrow \fasa{}(\bm{F}_t, \bm{F}_{t-1})$ \hfill \textit{// 空间感知（每相机1060D）}
+        \STATE $\bm{o}_t \leftarrow [\bm{f}_t;\, \Delta\bm{f}_t;\, s_t;\, \Delta s_t]$ \hfill \textit{// 语义速度}
+        \STATE $\bm{z}_t^{\text{obs}} \leftarrow W_{\text{enc}}\, \bm{o}_t$ \hfill \textit{// 观测编码}
+        \STATE $\bm{a}_{t:t+H} \leftarrow D_\psi\!\left(\text{ODE}(G_\theta,\, \bm{z}_t^{\text{obs}})\right)$ \hfill \textit{// 流 + 解码}
+        \STATE 入队$\bm{a}_{t:t+H_a}$；\; $\bm{F}_{t-1} \leftarrow \bm{F}_t$
+    \ENDIF
+    \STATE 执行$a_t \leftarrow \mathcal{Q}.\text{dequeue}()$
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}

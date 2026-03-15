@@ -1,0 +1,59 @@
+\section{预备知识}
+\label{sec:preliminaries}
+
+\subsection{最优传输条件流匹配}
+
+流匹配~\cite{lipman2023flow}学习一个时间相关的速度场$v_\theta: \RR^d \times [0,1] \to \RR^d$，生成一条概率路径$p_t$，将先验分布$p_0$（如标准高斯分布）插值到数据分布$p_1$。样本$x_0 \sim p_0$通过积分ODE传输到$x_1 \sim p_1$：
+\begin{equation}
+    \frac{\mathrm{d}x_t}{\mathrm{d}t} = v_\theta(x_t, t), \quad x_0 \sim p_0, \quad t \in [0, 1].
+    \label{eq:flow_ode}
+\end{equation}
+
+条件流匹配（CFM）目标通过回归条件速度场$u_t(x | x_1)$来训练$v_\theta$，该条件速度场生成条件概率路径$p_t(x | x_1)$：
+\begin{equation}
+    \LL_{\text{CFM}} = \EE_{t \sim \mathcal{U}[0,1],\, x_1 \sim p_1,\, x_t \sim p_t(\cdot|x_1)} \left\| v_\theta(x_t, t) - u_t(x_t | x_1) \right\|^2.
+    \label{eq:cfm_loss}
+\end{equation}
+
+使用最优传输CFM（OT-CFM）~\cite{tong2024improving}时，条件路径为具有OT耦合的线性插值：
+\begin{equation}
+    x_t = (1 - t)\, x_0 + t\, x_1, \quad u_t(x_t | x_1) = x_1 - x_0,
+    \label{eq:ot_interpolation}
+\end{equation}
+其中$(x_0, x_1)$通过OT计划$\pi^* = \argmin_\pi \EE_{(x_0,x_1)\sim\pi}\|x_0 - x_1\|^2$进行匹配。这产生比标准CFM更直的流轨迹和更快的收敛。
+
+在推理时，通过$K$步欧拉积分求解ODE生成动作：
+\begin{equation}
+    x_{t+\Delta t} = x_t + v_\theta(x_t, t) \cdot \Delta t, \quad \Delta t = 1/K.
+    \label{eq:euler_sampling}
+\end{equation}
+
+\subsection{VITA架构}
+\label{sec:vita_arch}
+
+VITA~\cite{gao2026vita}以隐空间公式实例化面向视觉运动策略的流匹配。架构由四个组件组成（图~\ref{fig:architecture}，灰色区域）：
+
+\paragraph{观测编码器$\FF_\phi$。}ResNet-18~\cite{he2016deep}主干网络从$N$个相机图像中提取视觉特征，经过全局平均池化后与本体感受状态$s_t \in \RR^{d_s}$拼接：
+\begin{equation}
+    \bm{o}_t = \FF_\phi\!\left(\{I_t^{(i)}\}_{i=1}^N,\; s_t\right) \in \RR^{d_o}, \quad d_o = 512N + d_s.
+    \label{eq:obs_encoder}
+\end{equation}
+线性投影将其映射到隐空间：$\bm{z}_t^{\text{obs}} = W_{\text{enc}}\, \bm{o}_t \in \RR^{d_z}$。
+
+\paragraph{动作自编码器。}一维CNN编码器$E_\psi$将动作块$\bm{a}_{t:t+H} \in \RR^{H \times d_a}$映射到隐向量$\bm{z}^{\text{act}} = E_\psi(\bm{a}_{t:t+H}) \in \RR^{d_z}$，MLP解码器$D_\psi$重建动作：$\hat{\bm{a}}_{t:t+H} = D_\psi(\bm{z}^{\text{act}})$。
+
+\paragraph{流网络$G_\theta$。}带有FiLM~\cite{perez2018film}时间条件化的MLP预测速度场。每层$l$执行：
+\begin{equation}
+    \bm{h}^{(l)} = \bm{h}^{(l-1)} + \gamma_t^{(l)} \odot \text{MLP}\!\left((\bm{1} + \bm{\alpha}_t^{(l)}) \odot \text{LN}(\bm{h}^{(l-1)}) + \bm{\beta}_t^{(l)}\right),
+    \label{eq:film_layer}
+\end{equation}
+其中$(\gamma_t, \bm{\alpha}_t, \bm{\beta}_t) = f^{(l)}(\text{SinEmb}(t))$是从流时间步$t$的正弦嵌入导出的FiLM参数。
+
+\paragraph{训练目标。}VITA使用复合损失：
+\begin{equation}
+    \LL_{\text{VITA}} = \LL_{\text{flow}} + \lambda_{\text{enc}} \LL_{\text{enc}} + \lambda_{\text{fld}} \LL_{\text{fld}} + \lambda_{\text{con}} \LL_{\text{con}},
+    \label{eq:vita_loss}
+\end{equation}
+其中$\LL_{\text{flow}}$是OT-CFM损失（公式~\ref{eq:cfm_loss}），$\LL_{\text{enc}}$是动作自编码器重建损失，$\LL_{\text{fld}}$是流解码重建损失，$\LL_{\text{con}} = \|\bm{z}^{\text{act}}_{\text{pred}} - \bm{z}^{\text{act}}\|^2$是隐空间一致性损失。关键的是，流从观测隐变量$\bm{z}_t^{\text{obs}}$而非随机噪声开始，建立了直接的视觉到动作映射。
+
+\paragraph{空间信息瓶颈。}在上述公式中，每个相机图像的特征图$\bm{F}^{(i)} \in \RR^{512 \times H' \times W'}$经过全局平均池化压缩为单个512维向量。这意味着所有空间结构——物体位置、交互区域、几何关系——在信息进入隐空间之前就已丢失。本文提出的\fasa{}正是替代这一池化操作，在保持即插即用兼容性的同时恢复丰富的空间信息。

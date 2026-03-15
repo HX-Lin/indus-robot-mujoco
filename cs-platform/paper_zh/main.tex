@@ -1,0 +1,69 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+% ============================================================
+% Packages
+% ============================================================
+\usepackage{ctex}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{bm}
+\usepackage{mathtools}
+
+% ============================================================
+% Custom commands
+% ============================================================
+\newcommand{\method}{VITA-FASA}
+\newcommand{\methodfull}{VITA with Flow-Aware Spatial Attention}
+\newcommand{\fasa}{FASA}
+\newcommand{\fasafull}{Flow-Aware Spatial Attention}
+\newcommand{\RR}{\mathbb{R}}
+\newcommand{\EE}{\mathbb{E}}
+\newcommand{\LL}{\mathcal{L}}
+\newcommand{\FF}{\mathcal{F}}
+\newcommand{\MM}{\mathcal{M}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{看见何处：面向流匹配机器人策略的\\自监督空间注意力}
+
+\author{
+  匿名作者
+}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+% === 摘要 ===
+\input{sections/abstract}
+% === 引言 ===
+\input{sections/introduction}
+% === 相关工作 ===
+\input{sections/related_work}
+% === 预备知识 ===
+\input{sections/preliminaries}
+% === 方法 ===
+\input{sections/method}
+% === 实验 ===
+\input{sections/experiments}
+% === 讨论 ===
+\input{sections/discussion}
+% === 结论 ===
+\input{sections/conclusion}
+
+\bibliographystyle{unsrtnat}
+\bibliography{../paper/references}
+
+\end{document}

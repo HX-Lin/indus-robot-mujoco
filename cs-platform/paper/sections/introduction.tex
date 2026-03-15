@@ -1,0 +1,30 @@
+\section{Introduction}
+\label{sec:introduction}
+
+Imitation learning from expert demonstrations has become a dominant paradigm for acquiring complex robotic manipulation skills~\cite{chi2023diffusion,zhao2023act,brohan2023rt2}. Among generative approaches, \emph{flow matching}~\cite{lipman2023flow,tong2024improving} has recently gained traction as an attractive alternative to diffusion-based policies. By learning a deterministic velocity field that transports a simple prior distribution to the target action distribution via ordinary differential equations (ODEs), flow matching offers several advantages: stable training without noise scheduling, fast sampling with few integration steps, and natural support for multi-modal action distributions. The VITA framework~\cite{gao2026vita} exemplifies this approach, demonstrating that flowing directly from visual observation latents to action latents yields superior multi-modal coverage compared to conditional diffusion policies.
+
+Despite these advances, current flow matching policies---and indeed most imitation learning architectures---suffer from two orthogonal limitations:
+
+\paragraph{Temporal blindness.} At each timestep, the policy observes only the current state (or a short fixed-length history) and produces an action chunk, with no mechanism to determine ``where it is'' within the broader task trajectory. This creates three concrete problems: (1)~\emph{phase ambiguity}---multi-phase tasks require qualitatively different behaviors (e.g., fast approach vs.\ slow tracking), but without temporal context the policy cannot distinguish behavioral modes; (2)~\emph{lack of episode-specific adaptation}---each episode involves different geometric configurations, yet a memoryless policy cannot leverage accumulated observations to refine its understanding; (3)~\emph{insufficient precision}---high-precision trajectory following benefits from understanding the temporal context of how the robot arrived at its current state.
+
+\paragraph{Spatial information loss.} Standard observation encoders apply global average pooling to convolutional feature maps, collapsing all spatial structure into a single vector. This discards critical information about \emph{where} task-relevant objects are located in the visual field. For precision tasks like seam tracking, the policy needs not only \emph{what} it sees but also the spatial layout---the position of the welding seam, the direction of approach, and the relative geometry between the tool and the workpiece.
+
+In this work, we propose the \textbf{\methodfull{} (\method{})} framework, which addresses both limitations through two self-supervised strategies (Figure~\ref{fig:architecture}):
+
+\begin{itemize}[leftmargin=*,itemsep=4pt]
+    \item \textbf{Self-Supervised Temporal Awareness} (Section~\ref{sec:temporal}): A unified \emph{Past-Present-Future} framework that extracts temporal structure entirely from the observation stream. A \emph{Self-Predictive Latent Dynamics} model provides a future-oriented phase-transition signal through prediction error; a \emph{Progress Predictor} with novel \emph{Dual FiLM} conditioning estimates task progress via ordinal ranking; and an \emph{Episodic Memory Bank} with same-episode context retrieval provides trajectory-level past context. Temporal feature differencing encodes ``semantic velocity'' as the foundation for all temporal modules.
+
+    \item \textbf{Self-Supervised Spatial Awareness via \fasa{}} (Section~\ref{sec:spatial}): \emph{\fasafull{} (\fasa{})} discovers task-relevant spatial regions through inter-frame feature temporal contrast. By detecting which regions change most between consecutive frames, \fasa{} decomposes spatial features into dynamic (interaction) and static (context) streams, encodes change centroids and directions, and extracts spatial keypoint coordinates---providing $2\times$ richer spatial information than global pooling, without any external teacher model.
+\end{itemize}
+
+Critically, both strategies are \emph{entirely self-supervised}: they require no phase labels, no temporal annotations, no spatial annotations, and no external teacher model at training time. The entire model---including the ResNet backbone---is trained end-to-end with auxiliary losses that naturally emerge from self-predictive, ordinal ranking, and change-detection formulations.
+
+We evaluate \method{} on a challenging 6-DOF S-curve seam tracking task, where a Yaskawa MR2010 manipulator must approach a randomly positioned workpiece and precisely follow a curved welding seam in simulation. Our experiments demonstrate significant improvements in tracking precision over the base VITA policy and several baselines.
+
+\paragraph{Contributions.} Our main contributions are:
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+    \item We identify temporal blindness and spatial information loss as two orthogonal limitations of flow matching visuomotor policies and propose a unified framework addressing both through self-supervised modules.
+    \item We design a \emph{Past-Present-Future} temporal awareness framework: self-predictive latent dynamics as a phase-transition detector, ordinal-ranking-based progress estimation with Dual FiLM conditioning, and a lightweight episodic memory bank with same-episode context retrieval.
+    \item We introduce \fasa{} (Flow-Aware Spatial Attention), a self-supervised spatial attention module that discovers task-relevant regions through multi-statistic inter-frame feature contrast, eliminating the need for external teacher models while providing rich spatial-geometric features.
+    \item We demonstrate the effectiveness of \method{} on a precision robotic tracking task, with comprehensive ablation studies validating the complementary contributions of temporal and spatial awareness.
+\end{enumerate}

@@ -1,0 +1,69 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+% ============================================================
+% Packages
+% ============================================================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{bm}
+\usepackage{mathtools}
+
+% ============================================================
+% Custom commands
+% ============================================================
+\newcommand{\method}{PPF}
+\newcommand{\methodfull}{Past-Present-Future}
+\newcommand{\fasa}{FASA}
+\newcommand{\fasafull}{Flow-Aware Spatial Attention}
+\newcommand{\RR}{\mathbb{R}}
+\newcommand{\EE}{\mathbb{E}}
+\newcommand{\LL}{\mathcal{L}}
+\newcommand{\FF}{\mathcal{F}}
+\newcommand{\MM}{\mathcal{M}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{Seeing When and Where: Self-Supervised Awareness\\for Flow Matching Robot Policies}
+
+\author{
+  Anonymous Authors
+}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+% === ABSTRACT ===
+\input{sections/abstract}
+% === INTRODUCTION ===
+\input{sections/introduction}
+% === RELATED WORK ===
+\input{sections/related_work}
+% === PRELIMINARIES ===
+\input{sections/preliminaries}
+% === METHOD ===
+\input{sections/method}
+% === EXPERIMENTS ===
+\input{sections/experiments}
+% === DISCUSSION ===
+\input{sections/discussion}
+% === CONCLUSION ===
+\input{sections/conclusion}
+
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+
+\end{document}

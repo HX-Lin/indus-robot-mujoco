@@ -9,6 +9,10 @@
     python train.py --policy act --resume outputs/act/last
 """
 
+import os
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 import argparse
 import sys
 import time
@@ -68,6 +72,8 @@ def parse_args():
     parser.add_argument("--action_type", type=str, default="action",
                         choices=["action", "action.ee_delta"],
                         help="Action type: 'action' (joint abs) or 'action.ee_delta'")
+    parser.add_argument("--pretrained_resnet", type=str, default=None,
+                        help="Path to pre-distilled ResNet checkpoint dir (from pretrain_resnet.py)")
 
     # 策略特有参数
     policy_cls.add_args(parser)
@@ -106,7 +112,8 @@ def save_loss_plot(train_history, val_history, output_dir):
     healthy_ranges = {
         "progress_mean":  (0.35, 0.65, "健康区间 ~0.5"),
         "progress_loss":  (None, 0.02, "收敛目标 <0.02"),
-        "dynamics_loss":  (None, 0.01, "收敛目标 <0.01"),
+        "distill_loss":   (None, 0.5, "收敛目标 <0.5"),
+        "feat_distill_loss": (None, 0.3, "收敛目标 <0.3"),
         "flow_loss":      (None, 0.001, "收敛目标 <1e-3"),
     }
 
@@ -264,6 +271,10 @@ def train(args):
     n_params = sum(p.numel() for p in policy.parameters())
     print(f"  Parameters: {n_params:,}")
 
+    # ── 3.5 Load pretrained ResNet weights (if provided) ─────────────
+    if getattr(args, 'pretrained_resnet', None) and hasattr(policy, 'load_pretrained_resnet'):
+        policy.load_pretrained_resnet(args.pretrained_resnet)
+
     # ── 4. Optimizer ───────────────────────────────────────────────────
     optimizer = policy.get_optimizer()
 
@@ -347,11 +358,14 @@ def train(args):
     if getattr(args, 'use_temporal', False):
         print("\n  Metric reference ranges:")
         print("    flow_loss       → target <1e-3  (init ~0.4)")
-        print("    dynamics_loss   → should stay >1e-4 (=0 means collapse)")
         print("    progress_loss   → target <0.02  (init ~0.08)")
         print("    progress_mean   → healthy 0.35~0.65 (should track data)")
         print("    enc_recon_loss  → target <0.005")
         print("    flow_recon_loss → target <0.005")
+    if getattr(args, 'use_gdino_distill', False):
+        print("    distill_loss    → target <0.5   (BCE spatial attn)")
+        print("    feat_distill_loss → target <0.3 (cosine feature distill)")
+    if getattr(args, 'use_temporal', False) or getattr(args, 'use_gdino_distill', False):
         print()
 
     policy.train()
@@ -418,9 +432,6 @@ def train(args):
             pm = avg_metrics.get("progress_mean")
             if pm is not None and (pm < 0.15 or pm > 0.85):
                 warnings.append(f"progress_mean={pm:.3f} !!!")
-            dl = avg_metrics.get("dynamics_loss")
-            if dl is not None and dl < 1e-5:
-                warnings.append("dynamics_loss≈0 !!!")
             warn_str = f" | {'  '.join(warnings)}" if warnings else ""
 
             print(

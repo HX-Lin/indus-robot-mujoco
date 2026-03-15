@@ -1,0 +1,127 @@
+\section{实验}
+\label{sec:experiments}
+
+\subsection{任务描述}
+\label{sec:task}
+
+我们在仿真环境中的6自由度机器人S型焊缝跟踪任务上评估\method{}（图~\ref{fig:task}）。安川MR2010工业机械臂需要执行一个两阶段任务：
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+    \item \textbf{接近阶段}（约200步）：机器人从中性位姿移动到随机放置工件上弯曲焊缝的起始点。该阶段需要快速、定向的运动和粗略定位。
+    \item \textbf{跟踪阶段}（约500步）：机器人精确跟随工件表面的S型焊缝轨迹。该阶段要求缓慢、精确的运动，达到亚毫米级精度。
+\end{enumerate}
+
+工件位置在不同episode间随机化，要求策略在不同几何配置间泛化。任务在MuJoCo~\cite{todorov2012mujoco}中仿真，具有真实的关节动力学和接触建模。
+
+\subsection{数据集}
+\label{sec:dataset}
+
+我们使用带有解析逆运动学的脚本控制器收集了160条专家示范轨迹。每条轨迹包含约700个时间步，以50~Hz录制。观测空间包括：
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+    \item 两个RGB相机图像（$480 \times 640$）：俯视图和末端执行器安装相机；
+    \item 6维关节角度（本体感受状态）。
+\end{itemize}
+动作空间为6维关节位置指令（绝对值）。数据集共计112,000帧，以LeRobot~\cite{cadene2024lerobot}格式存储，并附带逐特征归一化统计量。
+
+\subsection{基线方法}
+\label{sec:baselines}
+
+我们将\method{}与以下方法进行比较：
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+    \item \textbf{VITA}~\cite{gao2026vita}：基础流匹配策略，单帧观测（$\text{obs\_horizon}=1$），全局平均池化。
+    \item \textbf{VITA + obs\_horizon=2}：使用朴素双帧堆叠的VITA（特征拼接但不做差分）。
+    \item \textbf{VITA + 特征差分}：使用$\text{obs\_horizon}=2$和特征差分（语义速度）的VITA，但仍使用全局平均池化，无\fasa{}。
+    \item \textbf{ACT}~\cite{zhao2023act}：Action Chunking with Transformers，基于Transformer的模仿学习基线。
+\end{itemize}
+
+\subsection{评估指标}
+\label{sec:metrics}
+
+我们对每种方法在50个随机工件位置的episode上进行评估，报告以下指标：
+
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+    \item \textbf{接近成功率}（\%）：末端执行器到达焊缝起始点5mm以内的episode比例。
+    \item \textbf{跟踪距离}（mm）：跟踪阶段末端执行器与真实焊缝最近点之间的平均、中位数和最大欧氏距离。
+    \item \textbf{多级覆盖率}（\%）：跟踪步骤中距离低于0.5mm、1mm、2mm和5mm阈值的比例。
+    \item \textbf{奖励等级分布}：被评为S（$<$0.5mm平均）/ A（$<$1mm）/ B（$<$2mm）/ C（$<$5mm）/ D（$<$10mm）/ E（$<$20mm）/ FAIL（$\geq$20mm）的episode比例。
+\end{itemize}
+
+\subsection{实现细节}
+\label{sec:impl_details}
+
+所有模型使用隐空间维度$d_z = 512$，4层流网络（MLP比率4.0），动作块大小$H = 32$，动作窗口$H_a = 4$。流采样使用$K = 6$步欧拉积分。训练100k梯度步，使用AdamW优化器（$\beta_1 = 0.95$，$\beta_2 = 0.999$，权重衰减$10^{-6}$），批大小32，余弦学习率调度含500步预热。推理时使用指数$0.75$的EMA。ResNet-18主干网络与策略端到端训练（不冻结）。
+
+基础VITA损失权重为$\lambda_{\text{enc}} = 0.5$，$\lambda_{\text{fld}} = 0.5$，$\lambda_{\text{con}} = 1.0$。
+
+对于\fasa{}：每个相机的\fasa{}模块产生1060维特征向量（$512 + 512 + 4 + 32$），替代标准的512维全局平均池化输出。变化精炼网络$R_\rho$是4层CNN（$3 \to 32 \to 32 \to 1$），带批归一化，输入3通道（通道级特征差分的均值、最大值、标准差）。坐标投影每个相机增加约33k参数。\fasa{}要求$\text{obs\_horizon} \geq 2$以提供变化检测所需的连续帧；在每个episode的第一步，优雅降级为全局池化加空间softmax。
+
+对于视觉预蒸馏（可选）：使用Grounding DINO的Swin-T主干网络（来自~\cite{liu2023grounding}的预训练权重），为两个相机的所有112,000帧预提取空间注意力热图和768维语义特征。预蒸馏阶段对ResNet主干网络训练40k步，使用注意力BCE损失和特征余弦相似度损失。预蒸馏后，蒸馏头被丢弃，主干网络在策略训练期间继续端到端微调。
+
+基础VITA模型有约31.9M参数；加入\fasa{}后增加到约32.4M（每个相机仅增加约67k参数）。所有实验在单块NVIDIA RTX 4080 SUPER GPU（32GB）上运行。
+
+\subsection{主要结果}
+\label{sec:main_results}
+
+表~\ref{tab:main_results}给出了主要比较结果。\textit{结果将在实验完成后填入。}
+
+\begin{table*}[t]
+\centering
+\caption{S型焊缝跟踪任务的主要结果。最优结果用\textbf{粗体}标注。所有指标为50个评估episode的平均值。}
+\label{tab:main_results}
+\begin{tabular}{lccccccc}
+\toprule
+\multirow{2}{*}{\textbf{方法}} & \textbf{接近} & \multicolumn{3}{c}{\textbf{跟踪距离 (mm)}} & \multicolumn{3}{c}{\textbf{覆盖率 (\%)}} \\
+\cmidrule(lr){3-5} \cmidrule(lr){6-8}
+ & \textbf{成功率 (\%)} & 平均 & 中位数 & 最大 & $<$1mm & $<$2mm & $<$5mm \\
+\midrule
+ACT~\cite{zhao2023act}            & -- & -- & -- & -- & -- & -- & -- \\
+VITA~\cite{gao2026vita}           & -- & -- & -- & -- & -- & -- & -- \\
+VITA + obs\_horizon=2             & -- & -- & -- & -- & -- & -- & -- \\
+VITA + 特征差分            & -- & -- & -- & -- & -- & -- & -- \\
+\midrule
+\method{}（本文）                  & -- & -- & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{消融实验}
+\label{sec:ablation}
+
+为理解\fasa{}各组件的贡献，我们进行了系统的消融实验（表~\ref{tab:ablation}）。我们评估以下配置：
+
+\begin{enumerate}[label=(\alph*),leftmargin=*,itemsep=1pt]
+    \item VITA基线（全局平均池化，$\text{obs\_horizon}=1$）
+    \item VITA + obs\_horizon=2（朴素双帧堆叠）
+    \item VITA + 特征差分（语义速度，无\fasa{}）
+    \item \fasa{}仅动态流（无静态流、无质心编码）
+    \item \fasa{}无变化精炼网络（原始差分作为注意力）
+    \item 完整\fasa{}（动态+静态+质心+坐标）
+\end{enumerate}
+
+\begin{table*}[t]
+\centering
+\caption{消融实验。TD = 特征差分（语义速度），Dyn = 动态流，Sta = 静态流，CC = 变化质心/方向，SSM = 空间Softmax坐标，Ref = 变化精炼网络。}
+\label{tab:ablation}
+\begin{tabular}{cccccc|ccccc}
+\toprule
+\textbf{TD} & \textbf{Dyn} & \textbf{Sta} & \textbf{CC} & \textbf{SSM} & \textbf{Ref} & \textbf{接近 (\%)} & \textbf{平均 (mm)} & \textbf{中位数 (mm)} & \textbf{$<$2mm (\%)} & \textbf{$<$5mm (\%)} \\
+\midrule
+ &  &  &  &  &  & -- & -- & -- & -- & -- \\
+\checkmark &  &  &  &  &  & -- & -- & -- & -- & -- \\
+\checkmark & \checkmark &  &  &  &  & -- & -- & -- & -- & -- \\
+\checkmark & \checkmark &  &  &  & \checkmark & -- & -- & -- & -- & -- \\
+\checkmark & \checkmark & \checkmark & \checkmark & \checkmark &  & -- & -- & -- & -- & -- \\
+\checkmark & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{分析}
+\label{sec:analysis}
+
+\paragraph{\fasa{}注意力可视化。}图~\ref{fig:fasa_attention}可视化了\fasa{}在不同任务阶段产生的变化注意力图$\bm{A}_{\text{change}}$。在接近阶段，我们期望看到分散的注意力，因为整个场景快速变化。在跟踪阶段，注意力应集中在工具尖端附近的焊缝区域，证明\fasa{}在没有任何显式空间监督的情况下学会了关注任务相关区域。\textit{实验完成后将添加分析。}
+
+\paragraph{动态流 vs. 静态流。}\fasa{}将空间特征分解为动态流（交互区域特征）和静态流（稳定上下文特征）。我们分析两者在不同任务阶段的行为差异：接近阶段动态流变化剧烈，而跟踪阶段两者趋于一致。\textit{实验完成后将添加分析。}
+
+\paragraph{泛化能力。}我们通过在比训练集更大分布范围内采样的工件位置上进行测试来评估泛化能力。\textit{实验完成后将添加结果。}
